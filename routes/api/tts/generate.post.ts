@@ -13,23 +13,26 @@ interface TTSRequest {
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
 
-  let body: TTSRequest | undefined;
-  try {
-    body = await readBody<TTSRequest>(event);
-  } catch (error) {
-    console.error("[Nitro Proxy] Failed to read body:", error);
-    throw createError({
-      statusCode: 400,
-      statusMessage: "Failed to parse request body",
-    });
-  }
+  // 读取请求体 - 使用 readValidatedBody
+  const body = await readValidatedBody(event, (data) => {
+    if (!data || typeof data !== "object") {
+      throw createError({
+        statusCode: 400,
+        statusMessage: "Invalid request body",
+      });
+    }
 
-  if (!body || !body.text) {
-    throw createError({
-      statusCode: 400,
-      statusMessage: "Missing required field: text",
-    });
-  }
+    const typedData = data as TTSRequest;
+
+    if (!typedData.text || typeof typedData.text !== "string") {
+      throw createError({
+        statusCode: 400,
+        statusMessage: "Missing or invalid required field: text",
+      });
+    }
+
+    return typedData;
+  });
 
   try {
     console.log("[Nitro Proxy] 转发 TTS 请求到:", config.ttsServerUrl);
@@ -143,10 +146,12 @@ export default defineEventHandler(async (event) => {
         const wavBuffer = pcmToWav(audioBuffer, 22050, 16, 1);
 
         // 设置响应头
-        setResponseHeaders(event, {
-          "Content-Type": "audio/wav",
-          "Content-Disposition": 'attachment; filename="speech.wav"',
-        });
+        setHeader(event, "Content-Type", "audio/wav");
+        setHeader(
+          event,
+          "Content-Disposition",
+          'attachment; filename="speech.wav"'
+        );
 
         resolve(wavBuffer);
       });
