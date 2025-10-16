@@ -1,0 +1,18 @@
+{
+  "name": "ai-proxy",
+  "version": "1.0.0",
+  "description": "Proxy service for AI services (IndexTTS, ComfyUI)",
+  "type": "module",
+  "scripts": {
+    "dev": "nitro dev",
+    "build": "nitro build",
+    "preview": "node .output/server/index.mjs"
+  },
+  "keywords": ["ai", "proxy", "tts", "image-generation"],
+  "author": "p971607",
+  "license": "MIT",
+  "dependencies": {
+    "h3": "^2.0.1-rc.2",
+    "nitropack": "^2.12.7"
+  }
+}
