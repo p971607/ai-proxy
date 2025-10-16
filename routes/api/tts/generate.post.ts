@@ -2,97 +2,160 @@
 // 将 HTTP 请求转换为 WebSocket 调用 IndexTTS
 import { WebSocket } from 'ws'
 
+interface TTSRequest {
+  text: string;
+  audio_path?: string;
+  reference_audio_b64?: string;
+  emo_vector?: number[];
+  emo_alpha?: number;
+}
+
 export default defineEventHandler(async (event) => {
-  const config = useRuntimeConfig()
-  const body = await readBody(event)
+  const config = useRuntimeConfig();
+  const body = await readBody<TTSRequest>(event);
+
+  if (!body || !body.text) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Missing required field: text",
+    });
+  }
 
   try {
-    console.log('[Nitro Proxy] 转发 TTS 请求到:', config.ttsServerUrl)
-    console.log('[Nitro Proxy] 请求参数:', {
-      text: body.text?.substring(0, 50) + '...',
+    console.log("[Nitro Proxy] 转发 TTS 请求到:", config.ttsServerUrl);
+    console.log("[Nitro Proxy] 请求参数:", {
+      text: body.text?.substring(0, 50) + "...",
       hasAudioPath: !!body.audio_path,
+      hasReferenceAudioB64: !!body.reference_audio_b64,
       hasEmoVector: !!body.emo_vector,
-    })
+    });
 
     // 将 HTTP 请求转换为 WebSocket 消息
-    const wsUrl = config.ttsServerUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
+    const wsUrl =
+      config.ttsServerUrl
+        .replace("https://", "wss://")
+        .replace("http://", "ws://") + "/ws";
 
-    console.log('[Nitro Proxy] 连接 WebSocket:', wsUrl)
+    console.log("[Nitro Proxy] 连接 WebSocket:", wsUrl);
 
     // 创建 WebSocket 连接
-    const ws = new WebSocket(wsUrl)
+    const ws = new WebSocket(wsUrl);
 
     // 收集音频数据
-    const audioChunks: Buffer[] = []
+    const audioChunks: Buffer[] = [];
 
     return new Promise((resolve, reject) => {
       // 设置超时
       const timeout = setTimeout(() => {
-        ws.close()
-        reject(new Error('TTS 生成超时'))
-      }, 60000) // 60秒超时
+        ws.close();
+        reject(new Error("TTS 生成超时"));
+      }, 60000); // 60秒超时
 
-      ws.on('open', () => {
-        console.log('[Nitro Proxy] WebSocket 已连接')
+      ws.on("open", () => {
+        console.log("[Nitro Proxy] WebSocket 已连接");
 
         // 发送 TTS 请求
-        const wsMessage = {
+        const wsMessage: any = {
           text: body.text,
-          type: 'request',
+          type: "request",
           priority: 5,
-          reference_audio_path: body.audio_path,
-          infer_mode: 'normal',
+          infer_mode: "normal",
+        };
+
+        // 添加参考音频（优先使用 Base64）
+        if (body.reference_audio_b64) {
+          wsMessage.reference_audio_b64 = body.reference_audio_b64;
+        } else if (body.audio_path) {
+          wsMessage.reference_audio_path = body.audio_path;
         }
 
-        console.log('[Nitro Proxy] 发送 WebSocket 消息:', wsMessage)
-        ws.send(JSON.stringify(wsMessage))
-      })
+        console.log("[Nitro Proxy] 发送 WebSocket 消息:", {
+          ...wsMessage,
+          reference_audio_b64: wsMessage.reference_audio_b64
+            ? `[Base64 data, ${wsMessage.reference_audio_b64.length} chars]`
+            : undefined,
+        });
+        ws.send(JSON.stringify(wsMessage));
+      });
 
-      ws.on('message', (data: Buffer) => {
-        console.log('[Nitro Proxy] 收到音频数据:', data.length, 'bytes')
-        audioChunks.push(data)
-      })
+      ws.on("message", (data: Buffer) => {
+        // 检查是否是 JSON 消息
+        try {
+          const text = data.toString("utf8");
+          if (text.startsWith("{")) {
+            const json = JSON.parse(text);
+            console.log("[Nitro Proxy] 收到JSON消息:", json);
 
-      ws.on('close', () => {
-        clearTimeout(timeout)
-        console.log('[Nitro Proxy] WebSocket 已关闭')
+            // 如果是完成消息，关闭连接
+            if (json.type === "complete" || json.status === "complete") {
+              console.log("[Nitro Proxy] 生成完成");
+              ws.close();
+              return;
+            }
+
+            // 如果是错误消息
+            if (json.status === "error") {
+              console.error("[Nitro Proxy] 错误:", json.message);
+              ws.close();
+              reject(new Error(json.message));
+              return;
+            }
+
+            return; // JSON 消息不是音频数据
+          }
+        } catch (e) {
+          // 不是 JSON，可能是音频数据
+        }
+
+        // 是音频数据
+        console.log("[Nitro Proxy] 收到音频数据:", data.length, "bytes");
+        audioChunks.push(data);
+      });
+
+      ws.on("close", () => {
+        clearTimeout(timeout);
+        console.log("[Nitro Proxy] WebSocket 已关闭");
 
         if (audioChunks.length === 0) {
-          reject(new Error('未收到音频数据'))
-          return
+          reject(new Error("未收到音频数据"));
+          return;
         }
 
         // 合并所有音频数据
-        const audioBuffer = Buffer.concat(audioChunks)
-        console.log('[Nitro Proxy] TTS 生成成功，总大小:', audioBuffer.length, 'bytes')
+        const audioBuffer = Buffer.concat(audioChunks);
+        console.log(
+          "[Nitro Proxy] TTS 生成成功，总大小:",
+          audioBuffer.length,
+          "bytes"
+        );
 
         // 将 PCM 转换为 WAV
-        const wavBuffer = pcmToWav(audioBuffer, 22050, 16, 1)
+        const wavBuffer = pcmToWav(audioBuffer, 22050, 16, 1);
 
         // 设置响应头
         setResponseHeaders(event, {
-          'Content-Type': 'audio/wav',
-          'Content-Disposition': 'attachment; filename="speech.wav"',
-        })
+          "Content-Type": "audio/wav",
+          "Content-Disposition": 'attachment; filename="speech.wav"',
+        });
 
-        resolve(wavBuffer)
-      })
+        resolve(wavBuffer);
+      });
 
-      ws.on('error', (error) => {
-        clearTimeout(timeout)
-        console.error('[Nitro Proxy] WebSocket 错误:', error)
-        reject(error)
-      })
-    })
+      ws.on("error", (error) => {
+        clearTimeout(timeout);
+        console.error("[Nitro Proxy] WebSocket 错误:", error);
+        reject(error);
+      });
+    });
   } catch (error: any) {
-    console.error('[Nitro Proxy] TTS service error:', error)
+    console.error("[Nitro Proxy] TTS service error:", error);
 
     throw createError({
       statusCode: error.statusCode || 500,
-      statusMessage: error.message || 'TTS service error',
-    })
+      statusMessage: error.message || "TTS service error",
+    });
   }
-})
+});
 
 /**
  * 将 PCM 音频转换为 WAV 格式
