@@ -12,7 +12,17 @@ interface TTSRequest {
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
-  const body = await readBody<TTSRequest>(event);
+
+  let body: TTSRequest | undefined;
+  try {
+    body = await readBody<TTSRequest>(event);
+  } catch (error) {
+    console.error("[Nitro Proxy] Failed to read body:", error);
+    throw createError({
+      statusCode: 400,
+      statusMessage: "Failed to parse request body",
+    });
+  }
 
   if (!body || !body.text) {
     throw createError({
